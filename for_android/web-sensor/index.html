@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>센서 수집</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f2f2f7; --card: #ffffff; --fg: #1c1c1e; --muted: #6c6c70; --line: #d1d1d6;
+    --accent: #007aff; --danger: #ff3b30; --ok: #248a3d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #000000; --card: #1c1c1e; --fg: #f2f2f7; --muted: #98989f; --line: #3a3a3c;
+      --accent: #0a84ff; --danger: #ff453a; --ok: #30d158;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: var(--bg); color: var(--fg);
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  }
+  h1 { font-size: 22px; margin: 8px 0 12px; }
+  .card { background: var(--card); border-radius: 12px; padding: 12px 14px; margin: 12px 0; }
+  #status { color: var(--muted); }
+  #status.ok { color: var(--ok); }
+  #status.err { color: var(--danger); }
+  button {
+    -webkit-appearance: none; appearance: none; display: block; width: 100%;
+    padding: 16px; border: 0; border-radius: 12px;
+    font-family: inherit; font-size: 17px; font-weight: 600;
+    color: #fff; background: var(--accent); touch-action: manipulation;
+  }
+  #stop { position: relative; overflow: hidden; background: var(--danger); touch-action: none; }
+  #stop::before { content: ""; position: absolute; inset: 0; width: 0; background: rgba(0, 0, 0, .25); }
+  #stop.holding::before { width: 100%; transition: width .8s linear; }
+  #stop span { position: relative; }
+  .hidden { display: none; }
+  canvas { display: block; width: 100%; height: 120px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th { padding: 3px 0; text-align: left; font-weight: 400; color: var(--muted); white-space: nowrap; }
+  td { padding: 3px 0 3px 12px; text-align: right; }
+  .note { margin: 6px 0 0; font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+  <h1>센서 수집</h1>
+  <div class="card"><span id="status">불러오는 중…</span></div>
+
+  <button id="start">수집 시작</button>
+  <button id="stop" class="hidden"><span>길게 눌러 중지</span></button>
+
+  <div class="card">
+    <canvas id="chart"></canvas>
+    <p class="note">가속도 크기 |a| (중력 포함) · 최근 5초 · 회색 선은 1 g</p>
+  </div>
+
+  <div class="card">
+    <table>
+      <tr><th>세션</th><td id="session">–</td></tr>
+      <tr><th>경과 시간</th><td id="elapsed">–</td></tr>
+      <tr><th>모션 수신</th><td id="motionRate">–</td></tr>
+      <tr><th>방향 수신</th><td id="orientRate">–</td></tr>
+      <tr><th>서버 저장</th><td id="saved">–</td></tr>
+      <tr><th>전송 대기</th><td id="queued">–</td></tr>
+      <tr><th>화면 켜짐 유지</th><td id="wake">–</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <table>
+      <tr><th>가속도 x y z</th><td id="acc">–</td></tr>
+      <tr><th>중력 포함</th><td id="accg">–</td></tr>
+      <tr><th>회전 속도 α β γ</th><td id="rot">–</td></tr>
+      <tr><th>방향 α β γ</th><td id="ori">–</td></tr>
+      <tr><th>나침반</th><td id="heading">–</td></tr>
+    </table>
+    <p class="note">가속도는 m/s², 회전 속도는 °/s, 방향은 °</p>
+  </div>
+
+  <p class="note">Safari는 기압계와 자력계 원값을 웹에 열어 주지 않아 여기서는 수집하지 않습니다. 화면이 꺼지거나 다른 앱으로 넘어가면 기록이 멈추니 이 화면을 켜 둔 채로 쓰세요.</p>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const T0 = performance.timeOrigin || Date.now() - performance.now();
+const now = () => T0 + performance.now();
+
+const state = {
+  running: false, session: null, meta: null, startedAt: 0, flushTimer: null,
+  queue: { motion: [], orientation: [] }, inflight: null, saved: 0, netError: null,
+  last: { motion: null, orientation: null },
+  times: { motion: [], orientation: [] },  // 수신 주기 계산용 최근 2초 시각
+  chart: [], wakeLock: null,
+};
+
+function setStatus(text, cls = '') {
+  $('status').textContent = text;
+  $('status').className = cls;
+}
+
+// 이벤트 시각(epoch ms). 예전 Safari는 timeStamp 자체가 epoch ms다
+const stamp = (e) => (e.timeStamp > 1e12 ? e.timeStamp : T0 + e.timeStamp);
+
+function track(kind, t) {
+  const times = state.times[kind];
+  times.push(t);
+  while (t - times[0] > 2000) times.shift();
+}
+
+function onMotion(e) {
+  const t = stamp(e);
+  const a = e.acceleration || {}, g = e.accelerationIncludingGravity || {}, r = e.rotationRate || {};
+  // 순서는 server.py의 COLUMNS["motion"]과 같아야 한다
+  // 값은 받은 그대로 저장한다. iOS Safari는 가속도 부호가 W3C 규약과 반대이고 interval이 초 단위다
+  const row = [t, a.x, a.y, a.z, g.x, g.y, g.z, r.alpha, r.beta, r.gamma, e.interval];
+  state.queue.motion.push(row);
+  state.last.motion = row;
+  track('motion', t);
+  if (g.x != null) state.chart.push([t, Math.hypot(g.x, g.y, g.z)]);
+}
+
+function onOrientation(e) {
+  const t = stamp(e);
+  const row = [t, e.alpha, e.beta, e.gamma, e.webkitCompassHeading, e.webkitCompassAccuracy];
+  state.queue.orientation.push(row);
+  state.last.orientation = row;
+  track('orientation', t);
+}
+
+const pending = () => state.queue.motion.length + state.queue.orientation.length;
+
+// 쌓인 행을 서버로 보낸다. 실패한 묶음은 대기열 앞에 되돌려 다음에 다시 보낸다
+function flush() {
+  if (state.inflight) return state.inflight;
+  if (!pending()) return Promise.resolve();
+  const batch = state.queue;
+  state.queue = { motion: [], orientation: [] };
+  const body = { session: state.session, motion: batch.motion, orientation: batch.orientation };
+  if (state.meta) body.meta = state.meta;
+  state.inflight = fetch('data', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+    .then((res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      state.saved += batch.motion.length + batch.orientation.length;
+      state.meta = null;
+      state.netError = null;
+    })
+    .catch((err) => {
+      state.queue.motion = batch.motion.concat(state.queue.motion);
+      state.queue.orientation = batch.orientation.concat(state.queue.orientation);
+      state.netError = err.message;
+    })
+    .finally(() => { state.inflight = null; });
+  return state.inflight;
+}
+
+function sessionName(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+function requestWakeLock() {
+  return navigator.wakeLock ? navigator.wakeLock.request('screen').catch(() => null) : Promise.resolve(null);
+}
+
+function setWakeLock(lock) {
+  state.wakeLock = lock;
+  $('wake').textContent = lock ? '켜짐' : '안 됨 (설정에서 자동 잠금을 끄세요)';
+  if (lock) lock.addEventListener('release', () => { if (state.running) $('wake').textContent = '풀림'; });
+}
+
+$('start').addEventListener('click', () => {
+  // iOS는 권한 요청을 탭 이벤트 안에서 곧바로 호출해야 한다
+  const asks = [window.DeviceMotionEvent, window.DeviceOrientationEvent]
+    .filter((E) => E && typeof E.requestPermission === 'function')
+    .map((E) => E.requestPermission());
+  const wake = requestWakeLock();
+  Promise.all(asks)
+    .then((answers) => {
+      if (answers.some((a) => a !== 'granted')) {
+        wake.then((lock) => lock && lock.release());
+        setStatus('동작 및 방향 접근이 거부되었습니다. Safari에서 이 탭을 닫고 다시 열어 허용해 주세요.', 'err');
+        return;
+      }
+      wake.then(setWakeLock);
+      start();
+    })
+    .catch((err) => setStatus(`권한 요청 실패: ${err.message}`, 'err'));
+});
+
+function start() {
+  const d = new Date();
+  Object.assign(state, {
+    running: true, session: sessionName(d), startedAt: performance.now(),
+    meta: { userAgent: navigator.userAgent, startedAt: d.toISOString(), screen: [screen.width, screen.height, devicePixelRatio] },
+    queue: { motion: [], orientation: [] }, saved: 0, netError: null,
+    last: { motion: null, orientation: null }, times: { motion: [], orientation: [] }, chart: [],
+  });
+  window.addEventListener('devicemotion', onMotion);
+  window.addEventListener('deviceorientation', onOrientation);
+  state.flushTimer = setInterval(flush, 500);
+  $('start').classList.add('hidden');
+  $('stop').classList.remove('hidden');
+  $('session').textContent = state.session;
+  setStatus('수집 중', 'ok');
+  setTimeout(() => {
+    if (state.running && !state.last.motion) {
+      setStatus('센서 값이 들어오지 않습니다. 모션 센서가 없는 기기이거나 권한이 없습니다.', 'err');
+    }
+  }, 3000);
+}
+
+async function stop() {
+  if (!state.running) return;
+  state.running = false;
+  window.removeEventListener('devicemotion', onMotion);
+  window.removeEventListener('deviceorientation', onOrientation);
+  clearInterval(state.flushTimer);
+  $('stop').classList.add('hidden');
+  setStatus('남은 데이터를 보내는 중…');
+  for (let failures = 0; (pending() || state.inflight) && failures < 10; ) {
+    await flush();
+    if (state.netError) {
+      failures++;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  if (state.wakeLock) state.wakeLock.release().catch(() => {});
+  state.wakeLock = null;
+  $('wake').textContent = '–';
+  $('start').textContent = '새 세션 시작';
+  $('start').classList.remove('hidden');
+  if (pending()) setStatus(`전송 실패: ${pending()}개를 보내지 못했습니다 (${state.netError})`, 'err');
+  else setStatus(`저장 완료: web-sensor/data/${state.session}/`, 'ok');
+}
+
+// 주머니 속 오터치로 멈추지 않도록 0.8초 길게 눌러야 중지된다
+const stopBtn = $('stop');
+let holdTimer = null;
+stopBtn.addEventListener('pointerdown', () => {
+  stopBtn.classList.add('holding');
+  holdTimer = setTimeout(() => { stopBtn.classList.remove('holding'); stop(); }, 800);
+});
+for (const type of ['pointerup', 'pointerleave', 'pointercancel']) {
+  stopBtn.addEventListener(type, () => {
+    clearTimeout(holdTimer);
+    stopBtn.classList.remove('holding');
+  });
+}
+stopBtn.addEventListener('contextmenu', (e) => e.preventDefault());
+
+document.addEventListener('visibilitychange', () => {
+  if (!state.running) return;
+  if (document.visibilityState === 'hidden') {
+    flush();
+  } else {
+    setStatus('수집 중 (화면이 꺼져 있던 동안은 기록되지 않았습니다)', 'ok');
+    requestWakeLock().then(setWakeLock);
+  }
+});
+
+const fmt = (v, digits = 2) => (typeof v === 'number' && isFinite(v) ? v.toFixed(digits) : '–');
+const xyz = (row, i, digits = 2) => [row[i], row[i + 1], row[i + 2]].map((v) => fmt(v, digits)).join('  ');
+
+function rate(kind) {
+  const times = state.times[kind];
+  const n = times.length;
+  if (n < 2 || now() - times[n - 1] > 1000) return null;  // 1초 넘게 안 들어오면 멈춘 것으로 본다
+  return (n - 1) / ((times[n - 1] - times[0]) / 1000);
+}
+
+function drawChart() {
+  const canvas = $('chart');
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const end = now(), pts = state.chart;
+  while (pts.length && end - pts[0][0] > 5000) pts.shift();
+  if (pts.length < 2) return;
+  let lo = Infinity, hi = -Infinity;
+  for (const [, v] of pts) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  const mid = (lo + hi) / 2, span = Math.max(hi - lo, 4) * 1.2;
+  const x = (t) => w - ((end - t) / 5000) * w;
+  const y = (v) => h / 2 - ((v - mid) / span) * h;
+  const css = getComputedStyle(document.documentElement);
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = css.getPropertyValue('--line').trim();
+  ctx.beginPath(); ctx.moveTo(0, y(9.81)); ctx.lineTo(w, y(9.81)); ctx.stroke();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = css.getPropertyValue('--accent').trim();
+  ctx.beginPath();
+  pts.forEach(([t, v], i) => (i ? ctx.lineTo(x(t), y(v)) : ctx.moveTo(x(t), y(v))));
+  ctx.stroke();
+}
+
+let lastRender = 0;
+function render(ts) {
+  requestAnimationFrame(render);
+  if (ts - lastRender < 100) return;  // 초당 10번만 갱신
+  lastRender = ts;
+  if (state.running) $('elapsed').textContent = `${((performance.now() - state.startedAt) / 1000).toFixed(0)}초`;
+  for (const [kind, id] of [['motion', 'motionRate'], ['orientation', 'orientRate']]) {
+    const r = rate(kind);
+    $(id).textContent = r ? `${r.toFixed(1)} Hz` : state.running ? '멈춤' : '–';
+  }
+  $('saved').textContent = `${state.saved.toLocaleString()}개`;
+  $('queued').textContent = `${pending().toLocaleString()}개${state.netError ? ` · 오류: ${state.netError}` : ''}`;
+  const m = state.last.motion, o = state.last.orientation;
+  if (m) {
+    $('acc').textContent = xyz(m, 1);
+    $('accg').textContent = xyz(m, 4);
+    $('rot').textContent = xyz(m, 7, 1);
+  }
+  if (o) {
+    $('ori').textContent = xyz(o, 1, 1);
+    $('heading').textContent = typeof o[4] === 'number' ? `${fmt(o[4], 0)}° (±${fmt(o[5], 0)}°)` : '–';
+  }
+  drawChart();
+}
+
+if (!window.isSecureContext) setStatus('HTTPS 주소로 열어야 센서 권한을 받을 수 있습니다.', 'err');
+else if (!window.DeviceMotionEvent) setStatus('이 브라우저는 모션 센서를 지원하지 않습니다.', 'err');
+else setStatus('“수집 시작”을 누르고 동작 및 방향 접근을 허용하세요.');
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
