@@ -1,0 +1,4 @@
+# 분석 도구(recordings.py 등)용. server.py는 표준 라이브러리만 쓴다.
+#   python3 -m venv web-sensor/.venv
+#   web-sensor/.venv/bin/pip install -r web-sensor/requirements.txt
+numpy==2.5.4
