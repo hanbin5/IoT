@@ -28,13 +28,42 @@ final class Recordings extends SQLiteOpenHelper {
     void append(String s,JSONArray data) {
         getWritableDatabase().execSQL("INSERT INTO batches(s,payload,n) VALUES(?,?,?)",new Object[]{s,data.toString(),data.length()});
     }
-    void export(OutputStream output) throws Exception {
+    java.util.LinkedHashMap<String,String> list() throws Exception {
+        java.util.LinkedHashMap<String,String> result = new java.util.LinkedHashMap<>();
+        try (Cursor rows = getReadableDatabase().rawQuery(
+                "SELECT t.s,t.meta,COALESCE(SUM(b.n),0),COALESCE(SUM(CASE WHEN b.sent=1 THEN b.n ELSE 0 END),0) FROM sessions t LEFT JOIN batches b ON t.s=b.s GROUP BY t.s ORDER BY t.rowid DESC",null)) {
+            while (rows.moveToNext()) {
+                JSONObject meta = new JSONObject(rows.getString(1));
+                String date = meta.optString("startedAt","시각 없음");
+                try {
+                    date = java.time.Instant.parse(date).atZone(java.time.ZoneId.systemDefault())
+                        .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+                } catch (java.time.DateTimeException ignored) {}
+                result.put(rows.getString(0),date+" · "+rows.getLong(2)+"개 · 전송 "+rows.getLong(3)+"개"
+                    +"\n"+rows.getString(0));
+            }
+        }
+        return result;
+    }
+    synchronized void delete(java.util.List<String> selected) {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            for (String id : selected) {
+                db.delete("batches","s=?",new String[]{id});
+                db.delete("sessions","s=?",new String[]{id});
+            }
+            db.setTransactionSuccessful();
+        } finally { db.endTransaction(); }
+    }
+    synchronized void export(OutputStream output, java.util.List<String> selected) throws Exception {
         String[] motion = "acc_x acc_y acc_z grav_x grav_y grav_z gyro_x gyro_y gyro_z mag_x mag_y mag_z mag_accuracy quat_w quat_x quat_y quat_z".split(" ");
         SQLiteDatabase db = getReadableDatabase();
         try (ZipOutputStream zip = new ZipOutputStream(new BufferedOutputStream(output));
              Cursor sessions = db.rawQuery("SELECT s,meta,device FROM sessions ORDER BY rowid",null)) {
             while (sessions.moveToNext()) {
                 String s = sessions.getString(0);
+                if (!selected.contains(s)) continue;
                 zip.putNextEntry(new ZipEntry(s+"/meta.json"));
                 write(zip,new JSONObject(sessions.getString(1)).put("sessionId",s).put("deviceId",sessions.getString(2)).toString());
                 zip.closeEntry();

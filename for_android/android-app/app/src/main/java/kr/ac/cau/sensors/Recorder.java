@@ -77,7 +77,7 @@ public class Recorder extends Service implements SensorEventListener {
             listen(Sensor.TYPE_ROTATION_VECTOR,"자세",10000);
             listen(Sensor.TYPE_MAGNETIC_FIELD,"지자기",10000);
             boolean motion = listen(Sensor.TYPE_ACCELEROMETER,"가속도계",10000);
-            boolean baro = listen(Sensor.TYPE_PRESSURE,"기압계",1000000);
+            boolean baro = listen(Sensor.TYPE_PRESSURE,"기압계",10000);
             if (!motion && !baro) { finish("수집 가능한 센서가 없습니다"); return START_NOT_STICKY; }
             publish("수집 중");
             loop.postDelayed(tick,1000);
@@ -100,7 +100,7 @@ public class Recorder extends Service implements SensorEventListener {
             String name;
             if (type == Sensor.TYPE_PRESSURE) {
                 float p = e.values[0];
-                if (!(p > 0) || !Float.isFinite(p) || (lastPressure >= 0 && e.timestamp-lastPressure < 950000000L)) return;
+                if (!(p > 0) || !Float.isFinite(p)) return;
                 if (lastPressure < 0) baseline = p;
                 lastPressure = e.timestamp;
                 pressure = p;

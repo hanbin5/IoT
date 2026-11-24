@@ -1,0 +1,8 @@
+{
+  "origin_epoch_ns": 1795415094803708906,
+  "start_floor": 1,
+  "final_floor": 6,
+  "reference_height_m": -0.13048283202830363,
+  "offline": true,
+  "note": "Uses future samples; floors are hysteretic height estimates, not arrival ground truth."
+}

@@ -1,0 +1,13 @@
+start_s,end_s,activity
+0.0,4.5,stairs_down
+4.5,26.5,walking
+26.5,42.0,stairs_down
+42.0,63.0,walking
+63.0,77.0,stairs_down
+77.0,98.0,walking
+98.0,113.0,stairs_down
+113.0,139.0,walking
+139.0,153.5,stairs_down
+153.5,179.5,walking
+179.5,194.0,stairs_down
+194.0,208.5,walking
