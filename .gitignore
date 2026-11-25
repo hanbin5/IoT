@@ -13,5 +13,6 @@ DerivedData/
 # 과제 원본 슬라이드: 교수님 자료라 공개 저장소에는 올리지 않고 로컬에만 둔다
 About term project.pdf
 
-# server.py가 쌓는 녹화 데이터: 로컬에만 두고, 정리한 데이터셋은 필요할 때 따로 커밋한다
+# server.py가 쌓는 녹화 데이터: 로컬에만 둔다. 팀원과 나눌 녹화는 web-sensor/export_dataset.py로
+# estimator/measurement/에 옮겨 커밋한다
 web-sensor/data/
